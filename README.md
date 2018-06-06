@@ -1,6 +1,10 @@
 # Prawn/Fillform: Fill Text and Images through Acroform Fields
 
-### Sorry, I have unfortunately no time to maintain the code. You can use the code for any purpose.
+### Legalpad's Fork
+
+This fork includes ad-hoc changes and fixes to get things working with
+the latest development version of Prawn and its unsupported `prawn-templates`
+add-on.
 
 ## Install
 

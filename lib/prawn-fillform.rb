@@ -17,9 +17,12 @@ module Prawn
     class Field
       include Prawn::Document::Internals
 
-      def initialize(dictionary)
+      def initialize(state, dictionary)
+        @state = state
         @dictionary = dictionary
       end
+
+      attr_reader :state
 
       def description
         get_dict_item(:TU)
@@ -146,7 +149,12 @@ module Prawn
       def embedded_fonts
         ap = get_dict_item(:AP)
         return nil if ap.nil?
-        deref(deref(ap[:N])[:Resources][:Font])
+        [:N, :Resources, :Font].reduce(ap) do |x, key|
+          return nil if x.nil?
+          x = deref(x)
+          return nil if x.nil?
+          x[key]
+        end
       end
 
       def type
@@ -163,6 +171,12 @@ module Prawn
 
       def comb?
         has_flag?(FLAG_COMB)
+      end
+    end
+
+    class Choice < Text
+      def type
+        :choice
       end
     end
 
@@ -186,6 +200,8 @@ module Prawn
         @refs_2 = []
         collect!
       end
+
+      attr_accessor :state
 
       def delete!
         @refs.each do |ref|
@@ -238,7 +254,7 @@ module Prawn
 
     def acroform_fields
       acroform = {}
-      state.pages.each_with_index do |page, i|
+      @state.pages.each_with_index do |page, i|
         page_number = "page_#{i+1}".to_sym
         acroform[page_number] = acroform_fields_for_page(page)
       end
@@ -253,7 +269,8 @@ module Prawn
         annots.flat_map do |ref|
           dictionary = deref(ref)
           if dictionary[:Parent]
-            deref(deref(dictionary[:Parent])[:Kids]).map { |kid| deref(kid) }.select { |kid| kid[:P] == page.dictionary }
+            kids = deref(deref(dictionary[:Parent])[:Kids]).presence || []
+            kids.map { |kid| deref(kid) }.select { |kid| kid[:P] == page.dictionary }
           else
             [dictionary]
           end
@@ -265,19 +282,20 @@ module Prawn
           else
             type = deref(dictionary[:FT])
           end
-          next unless (type == :Sig || type == :Tx || type == :Btn)
 
           case type
           when :Tx
-            page_fields << Text.new(dictionary)
+            page_fields << Text.new(@state, dictionary)
+          when :Ch
+            page_fields << Choice.new(@state, dictionary)
           when :Btn
             if deref(dictionary[:AP]).has_key? :D
-              page_fields << Checkbox.new(dictionary)
+              page_fields << Checkbox.new(@state, dictionary)
             else
-              page_fields << Button.new(dictionary)
+              page_fields << Button.new(@state, dictionary)
             end
           when :Sig
-            page_fields << Button.new(dictionary)
+            page_fields << Button.new(@state, dictionary)
           end
         end
       end
@@ -295,109 +313,115 @@ module Prawn
       value
     end
 
-    # Found by manual adjustment until it looked right.
-    FILLFORM_X_OFFSET = -34
-    FILLFORM_Y_OFFSET = -38
-
-    def fill_form_page_with(data, x_offset: FILLFORM_X_OFFSET, y_offset: FILLFORM_Y_OFFSET, allow_comb_overflow: false)
+    def fill_form_page_with(data, allow_comb_overflow: false)
       acroform_fields_for_page(page).each do |field|
-        value = fetch_field_attribute(data, page, field.name, :value)
-        if value
-          options = fetch_field_attribute(data, page, field.name, :options) || {}
-          value = value.to_s
-          x_offset = options[:x_offset] || x_offset
-          y_offset = options[:y_offset] || y_offset
-          x_position = field.x + x_offset
-          y_position = field.y + y_offset
-          width = options[:width] || field.width
-          height = options[:height] || field.height
+        canvas do
+          value = fetch_field_attribute(data, page, field.name, :value)
+          if value
+            options = fetch_field_attribute(data, page, field.name, :options) || {}
+            value = value.to_s
+            x_position = field.x
+            y_position = field.y
 
-          if field.type == :text
-            fill_color options[:font_color] || field.font_color
-            font options[:font_face] || field.font_face
+            if field.type == :text || field.type == :choice
+              fill_color "#{options[:font_color] || field.font_color}00"
+              font options[:font_face] || field.font_face
 
-            # Default to the document font size if the field size is 0
-            size = options[:font_size] || ((size = field.font_size) > 0.0 ? size : font_size)
-            style = options[:font_style] || field.font_style
+              # Default to the document font size if the field size is 0
+              size = options[:font_size] || ((size = field.font_size) > 0.0 ? size : font_size)
+              style = options[:font_style] || field.font_style
+              character_spacing = options[:character_spacing] || 0
 
-            # Check if the comb field can be drawn
-            draw_comb_field = field.comb? && field.no_spellcheck? && field.no_scroll?
-            if draw_comb_field && value.length > field.max_length
-              if allow_comb_overflow
-                # Fallback to drawing a text box
-                draw_comb_field = false
-              else
-                raise Prawn::Errors::CannotFit
+              # Check if the comb field can be drawn
+              draw_comb_field = field.comb? && field.no_spellcheck? && field.no_scroll?
+              if draw_comb_field && value.length > field.max_length
+                if allow_comb_overflow
+                  # Fallback to drawing a text box
+                  draw_comb_field = false
+                else
+                  raise Prawn::Errors::CannotFit
+                end
               end
-            end
 
-            if draw_comb_field
-              x_spacing = width / field.max_length
-              value.split('').each_with_index do |c, index|
-                text_box c, :at => [x_position + x_spacing * index, y_position],
-                  :align => :center,
-                  :width => x_spacing,
+              if draw_comb_field
+                x_spacing = width / field.max_length
+                value.split('').each_with_index do |c, index|
+                  text_box c, :at => [x_position + x_spacing * index, y_position],
+                    :align => :center,
+                    :width => x_spacing,
+                    :height => height,
+                    :valign => options[:valign] || :center,
+                    :size => size,
+                    :style => style,
+                    :overflow => :shrink_to_fit,
+                    :character_spacing => character_spacing
+                end
+              else
+                x_margin = options.fetch(:x_margin, 3)
+                y_margin = options.fetch(:y_margin, 1)
+                x_position = field.x + x_margin
+                y_position = field.y - y_margin
+                width = options.fetch(:width, field.width) - x_margin * 2
+                height = options.fetch(:height, field.height) - y_margin * 2
+                text_box value, :at => [x_position, y_position],
+                  :align => options[:align] || field.align,
+                  :width => width,
                   :height => height,
                   :valign => options[:valign] || :center,
                   :size => size,
                   :style => style,
-                  :overflow => :strink_to_fit
+                  :overflow => :shrink_to_fit,
+                  :character_spacing => character_spacing
               end
-            else
-              text_box value, :at => [x_position, y_position],
-                :align => options[:align] || field.align,
-                :width => width,
-                :height => height,
-                :valign => options[:valign] || :center,
-                :size => size,
-                :style => style
-            end
-          elsif field.type == :checkbox
-            is_yes = (v = value.downcase) == "yes" || v == "1" || v == "true"
-            if is_yes
-              stroke do
-                # Determine relative co-ordinates based on current bounding box
-                check_left = field.x - bounds.absolute_left
-                check_bottom = field.y - field.height - bounds.absolute_bottom
+            elsif field.type == :checkbox
+              is_yes = (v = value.downcase) == "yes" || v == "1" || v == "true"
+              if is_yes
+                stroke do
+                  # Determine relative co-ordinates based on current bounding box
+                  check_left = field.x - bounds.absolute_left
+                  check_bottom = field.y - field.height - bounds.absolute_bottom
 
-                # Draw check mark
-                line check_left, check_bottom, check_left + field.width, check_bottom + field.height
-                line check_left + field.width, check_bottom, check_left, check_bottom + field.height
+                  # Draw check mark
+                  line check_left, check_bottom, check_left + field.width, check_bottom + field.height
+                  line check_left + field.width, check_bottom, check_left, check_bottom + field.height
+                end
               end
-            end
-          elsif field.type == :button
-            bounding_box([x_position, y_position], :width => width, :height => height) do
-              image_options = {
-                :position => options[:position] || :center,
-                :vposition => options[:vposition] || :center,
-              }
-              if options[:fill]
-                image_options[:fit] = [width, height]
-              else
-                image_options[:height] = height
-              end
-              if value =~ /http/
-                image open(value), image_options
-              else
-                image value, image_options
+            elsif field.type == :button
+              bounding_box([x_position, y_position], :width => width, :height => height) do
+                image_options = {
+                  :position => options[:position] || :center,
+                  :vposition => options[:vposition] || :center,
+                }
+                if options[:fill]
+                  image_options[:fit] = [width, height]
+                else
+                  image_options[:height] = height
+                end
+                if value =~ /http/
+                  image open(value), image_options
+                else
+                  image value, image_options
+                end
               end
             end
           end
-        end
+      end
       end
     end
 
-    def fill_form_with(data, x_offset: FILLFORM_X_OFFSET, y_offset: FILLFORM_Y_OFFSET, allow_comb_overflow: false)
-      state.pages.each_index do |number|
+    def fill_form_with(data,
+                       allow_comb_overflow: false,
+                       remove_fields: true)
+      @state.pages.each_index do |number|
         go_to_page(number)
-        fill_form_page_with(data, x_offset: x_offset, y_offset: y_offset, allow_comb_overflow: allow_comb_overflow)
+        fill_form_page_with(data, allow_comb_overflow: allow_comb_overflow)
       end
 
-      remove_form_fields
+      remove_form_fields if remove_fields
     end
 
     def remove_form_fields
-      references = References.new(state)
+      references = References.new(@state)
       references.delete!
     end
   end
