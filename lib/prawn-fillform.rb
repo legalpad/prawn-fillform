@@ -25,7 +25,7 @@ module Prawn
       attr_reader :state
 
       def description
-        get_dict_item(:TU)
+        get_dict_string(:TU)
       end
 
       def rect
@@ -33,7 +33,7 @@ module Prawn
       end
 
       def name
-        get_dict_item(:T)
+        get_dict_string(:T)
       end
 
       def x
@@ -83,6 +83,18 @@ module Prawn
         else
           parent = deref(@dictionary[:Parent])
           deref(parent[key]) if parent
+        end
+      end
+
+      def get_dict_string(key)
+        value = get_dict_item(key)
+        return unless value.is_a?(String)
+        #NOTE: Some PDFs have UTF16 encoding despite their headers
+        # stating otherwise. Detect that by the BOM and convert them.
+        if value.starts_with?("\xFE\xFF")
+          PDF::Reader::Encoding.new(:"UTF16Encoding").to_utf8(value)
+        else
+          value
         end
       end
 
